@@ -19,6 +19,7 @@ import io.aeron.*;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.ArchiveException;
 import io.aeron.archive.client.RecordingSignalPoller;
+import io.aeron.archive.client.ReplicationParams;
 import io.aeron.archive.codecs.*;
 import io.aeron.archive.status.RecordingPos;
 import io.aeron.cluster.client.AeronCluster;
@@ -488,41 +489,9 @@ final class ConsensusModuleAgent
     /**
      * {@inheritDoc}
      */
-    public void updateLastActivityNs(final long clusterSessionId, final long timeNs)
+    public ClusterClientSession getClientSession(final long clusterSessionId)
     {
-        final ClusterSession session = sessionByIdMap.get(clusterSessionId);
-        if (null != session && session.state() == ClusterSession.State.OPEN)
-        {
-            session.timeOfLastActivityNs(timeNs);
-        }
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    public Publication responsePublication(final long clusterSessionId)
-    {
-        final ClusterSession session = sessionByIdMap.get(clusterSessionId);
-        if (null != session)
-        {
-            return session.responsePublication();
-        }
-
-        return null;
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    public byte[] encodedPrinciple(final long clusterSessionId)
-    {
-        final ClusterSession session = sessionByIdMap.get(clusterSessionId);
-        if (null != session)
-        {
-            return session.encodedPrincipal();
-        }
-
-        return null;
+        return sessionByIdMap.get(clusterSessionId);
     }
 
     public void onLoadBeginSnapshot(
@@ -684,7 +653,7 @@ final class ConsensusModuleAgent
         if (leadershipTermId == this.leadershipTermId && Cluster.Role.LEADER == role)
         {
             final ClusterSession session = sessionByIdMap.get(clusterSessionId);
-            if (null != session && session.state() == ClusterSession.State.OPEN)
+            if (null != session && session.isOpen())
             {
                 session.closing(CloseReason.CLIENT_ACTION);
                 session.disconnect(aeron, ctx.countedErrorHandler());
@@ -772,7 +741,7 @@ final class ConsensusModuleAgent
         if (leadershipTermId == this.leadershipTermId && Cluster.Role.LEADER == role)
         {
             final ClusterSession session = sessionByIdMap.get(clusterSessionId);
-            if (null != session && session.state() == ClusterSession.State.OPEN)
+            if (null != session && session.isOpen())
             {
                 final long timestamp = clusterClock.time();
                 if (logPublisher.appendMessage(
@@ -3091,17 +3060,38 @@ final class ConsensusModuleAgent
     }
 
     RecordingReplication newLogReplication(
-        final String leaderArchiveEndpoint, final long leaderRecordingId, final long stopPosition, final long nowNs)
+        final String leaderArchiveEndpoint,
+        final String responseArchiveEndpoint,
+        final long leaderRecordingId,
+        final long stopPosition,
+        final long nowNs)
     {
+        String replicationChannel = ctx.replicationChannel();
+
+        final ReplicationParams replicationParams = new ReplicationParams()
+            .dstRecordingId(logRecordingId)
+            .stopPosition(stopPosition)
+            .replicationSessionId((int)aeron.nextCorrelationId());
+
+        if (null != responseArchiveEndpoint)
+        {
+            final ChannelUri channelUri = ChannelUri.parse(replicationChannel);
+            channelUri.remove(ENDPOINT_PARAM_NAME);
+            channelUri.put(MDC_CONTROL_PARAM_NAME, responseArchiveEndpoint);
+            channelUri.put(MDC_CONTROL_MODE_PARAM_NAME, CONTROL_MODE_RESPONSE);
+            replicationChannel = channelUri.toString();
+
+            replicationParams.srcResponseChannel(replicationChannel);
+        }
+
+        replicationParams.replicationChannel(replicationChannel);
+
         return new RecordingReplication(
             archive,
             leaderRecordingId,
-            logRecordingId,
-            stopPosition,
             ChannelUri.createDestinationUri(ctx.leaderArchiveControlChannel(), leaderArchiveEndpoint),
             archive.context().controlRequestStreamId(),
-            ctx.replicationChannel(),
-            (int)aeron.nextCorrelationId(),
+            replicationParams,
             ctx.leaderHeartbeatTimeoutNs(),
             ctx.leaderHeartbeatIntervalNs(),
             nowNs);
